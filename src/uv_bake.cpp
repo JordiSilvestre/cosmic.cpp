@@ -1,4 +1,5 @@
 #include "uv_bake.h"
+#include "mesh_sort.h"
 #include "voxel_pbr_sampler.h"
 #include "xatlas.h"
 #include "meshoptimizer.h"
@@ -212,8 +213,26 @@ int weld_vertices(std::vector<float>& verts, std::vector<int32_t>& faces, std::v
     auto ckey = [](int64_t x, int64_t y, int64_t z) {
         return ((uint64_t)(uint32_t)(int32_t)x << 42) ^ ((uint64_t)(uint32_t)(int32_t)y << 21) ^ (uint64_t)(uint32_t)(int32_t)z;
     };
-    std::unordered_map<uint64_t, std::vector<int>> cells;
-    cells.reserve((size_t)V * 2);
+    // cosmic.cpp: same greedy algorithm and cell keys as before (bit-identical output), but the
+    // cell -> kept-vertices map is a flat open-addressing table with per-cell linked lists in
+    // arrays, instead of an unordered_map that allocated one std::vector per occupied cell.
+    size_t cap = 16;
+    int cap_bits = 4;
+    while (cap < (size_t)V * 2) { cap <<= 1; ++cap_bits; }
+    std::vector<uint64_t> slot_key(cap);
+    std::vector<int32_t> slot_head(cap, -1), slot_tail(cap, -1);   // -1 = empty slot
+    std::vector<int32_t> next_kept((size_t)V, -1);                  // kept vertex -> next in its cell
+    auto slot_of = [&](uint64_t k, bool insert) -> int64_t {
+        // Fibonacci hashing: the HIGH bits of the product mix x, y and z (the low bits only see z).
+        size_t i = (size_t)((k * 0x9E3779B97F4A7C15ull) >> (64 - cap_bits));
+        while (slot_head[i] >= 0) {
+            if (slot_key[i] == k) return (int64_t)i;
+            i = (i + 1) & (cap - 1);
+        }
+        if (!insert) return -1;
+        slot_key[i] = k;
+        return (int64_t)i;
+    };
     std::vector<int> remap((size_t)V);
     std::vector<float> nv; nv.reserve(verts.size());
     std::vector<float> ncol; if (colors3) ncol.reserve(colors3->size());
@@ -227,9 +246,9 @@ int weld_vertices(std::vector<float>& verts, std::vector<int32_t>& faces, std::v
         for (int dz = -1; dz <= 1 && found < 0; ++dz)
         for (int dy = -1; dy <= 1 && found < 0; ++dy)
         for (int dx = -1; dx <= 1 && found < 0; ++dx) {
-            auto it = cells.find(ckey(cx+dx, cy+dy, cz+dz));
-            if (it == cells.end()) continue;
-            for (int c : it->second) {
+            const int64_t s = slot_of(ckey(cx+dx, cy+dy, cz+dz), false);
+            if (s < 0) continue;
+            for (int c = slot_head[s]; c >= 0; c = next_kept[c]) {   // insertion order, as before
                 const float ex = nv[3*c]-p[0], ey = nv[3*c+1]-p[1], ez = nv[3*c+2]-p[2];
                 if (ex*ex + ey*ey + ez*ez <= eps2) { found = c; break; }
             }
@@ -238,7 +257,9 @@ int weld_vertices(std::vector<float>& verts, std::vector<int32_t>& faces, std::v
             found = keep++;
             nv.insert(nv.end(), p, p + 3);
             if (colors3) ncol.insert(ncol.end(), &(*colors3)[3*v], &(*colors3)[3*v] + 3);
-            cells[ckey(cx, cy, cz)].push_back(found);
+            const int64_t s = slot_of(ckey(cx, cy, cz), true);
+            if (slot_head[s] < 0) slot_head[s] = found; else next_kept[slot_tail[s]] = found;
+            slot_tail[s] = found;
         }
         remap[v] = found;
     }
@@ -263,14 +284,9 @@ void clean_mesh(int V, std::vector<int32_t>& faces) {
     }
     const int F = (int)(faces.size() / 3);
     if (F == 0) return;
-    // 2. undirected edge -> incident faces
-    std::unordered_map<uint64_t, std::vector<int>> ef;
-    ef.reserve((size_t)F * 3);
-    auto ek = [](int a, int b) -> uint64_t {
-        return ((uint64_t)(uint32_t)std::min(a, b) << 32) | (uint32_t)std::max(a, b);
-    };
-    for (int f = 0; f < F; ++f)
-        for (int j = 0; j < 3; ++j) ef[ek(faces[3*f+j], faces[3*f+(j+1)%3])].push_back(f);
+    // 2. manifold-edge neighbour of every face corner slot (cosmic.cpp: one GPU/CPU sort of 3F
+    // edge keys instead of an unordered_map holding one vector per edge).
+    const std::vector<int32_t> nbr = manifold_edge_neighbours(faces);
     // 3. BFS flood; flip faces to a consistent winding across manifold (exactly-2-face) edges.
     // Non-manifold / boundary edges are not crossed, so orientation stays locally consistent.
     std::vector<char> vis(F, 0), flip(F, 0);
@@ -284,10 +300,9 @@ void clean_mesh(int V, std::vector<int32_t>& faces) {
             if (flip[f]) std::swap(v[1], v[2]);
             for (int j = 0; j < 3; ++j) {
                 int a = v[j], b = v[(j+1)%3];
-                auto it = ef.find(ek(a, b));
-                if (it == ef.end() || it->second.size() != 2) continue;
-                int g = it->second[0] == f ? it->second[1] : it->second[0];
-                if (vis[g]) continue;
+                // Corrected edge j is the face's original slot j, or 2-j once its winding flipped.
+                const int g = nbr[3*f + (flip[f] ? 2 - j : j)];
+                if (g < 0 || vis[g]) continue;
                 bool same = false;   // g traverses this edge the SAME way as f's corrected winding?
                 for (int k = 0; k < 3; ++k)
                     if (faces[3*g+k] == a && faces[3*g+(k+1)%3] == b) { same = true; break; }
@@ -414,18 +429,9 @@ static std::vector<int> face_components(const std::vector<int32_t>& faces, int V
     }
     // Only manifold edges (exactly two faces) join: a fin glued on by an edge shared with 3-4
     // faces (non-manifold; ~2K on a 300K-face Pixal3D knight) must count as its own component.
-    struct EdgeUse { int f0 = -1, f1 = -1, n = 0; };
-    std::unordered_map<uint64_t, EdgeUse> edges;
-    edges.reserve(F * 2);
-    for (size_t f = 0; f < F; ++f)
-        for (int k = 0; k < 3; ++k) {
-            const uint32_t a = (uint32_t)faces[3*f + k], b = (uint32_t)faces[3*f + (k + 1) % 3];
-            EdgeUse& e = edges[((uint64_t)std::min(a, b) << 32) | std::max(a, b)];
-            if (e.n == 0) e.f0 = (int)f; else if (e.n == 1) e.f1 = (int)f;
-            ++e.n;
-        }
-    for (const auto& kv : edges)
-        if (kv.second.n == 2) uni(kv.second.f0, kv.second.f1);
+    const std::vector<int32_t> nbr = manifold_edge_neighbours(faces);
+    for (size_t s = 0; s < nbr.size(); ++s)
+        if (nbr[s] >= 0) uni((int)(s / 3), nbr[s]);
     for (size_t f = 0; f < F; ++f) comp[f] = find((int)f);
     return comp;
 }
@@ -436,13 +442,14 @@ int drop_small_components(std::vector<float>& verts, std::vector<int32_t>& faces
     const size_t F = faces.size() / 3;
     if (V == 0 || F == 0) return 0;
     const std::vector<int> comp = face_components(faces, V, edge_connected);
-    std::unordered_map<int,int> fc;
+    // Component ids are union-find roots (vertex ids, or face ids in edge mode): count in a
+    // dense array rather than a hash map over tens of millions of faces.
+    std::vector<int> fc(edge_connected ? F : (size_t)V, 0);
     for (size_t f = 0; f < F; ++f) fc[comp[f]]++;
-    int maxfc = 0;
-    for (auto& kv : fc) maxfc = std::max(maxfc, kv.second);
+    const int maxfc = *std::max_element(fc.begin(), fc.end());
     const int thresh = (int)(frac * maxfc);
     int dropped = 0;
-    for (auto& kv : fc) if (kv.second < thresh) ++dropped;
+    for (int n : fc) if (n > 0 && n < thresh) ++dropped;
     if (dropped == 0) return 0;
     std::vector<int32_t> kf; kf.reserve(faces.size());
     for (size_t f = 0; f < F; ++f)
@@ -587,34 +594,36 @@ int fill_small_holes(std::vector<int32_t>& faces, int max_loop) {
         return ((uint64_t)(uint32_t)a << 32) | (uint32_t)b;
     };
 
+    // cosmic.cpp: boundary edges (undirected use count exactly 1) from one GPU/CPU sort of the
+    // 3F edge keys instead of an unordered_map over every edge. The boundary list comes out in
+    // edge-key order rather than hash order, so a hole may get a different fan apex; the set of
+    // holes filled is unchanged.
     auto collect_boundary = [&](const char* pass) {
         const size_t F = faces.size() / 3;
-        struct Use { int count = 0; uint64_t directed = 0; };
-        std::unordered_map<uint64_t, Use> euse;
-        // This is the same asymptotic map as fill_holes(), which already runs
-        // successfully on the decoded mesh before texture generation.  Do not
-        // over-reserve 6*F buckets like the previous fill_small_holes path.
-        euse.reserve(F * 3);
-        for (size_t f = 0; f < F; ++f) {
+        std::vector<uint64_t> keys(3 * F);
+        std::vector<int32_t> slots(3 * F);
+        for (size_t f = 0; f < F; ++f)
             for (int j = 0; j < 3; ++j) {
-                const int a = faces[3*f+j], b = faces[3*f+(j+1)%3];
-                auto& e = euse[ukey(a, b)];
-                ++e.count;
-                if (e.count == 1) e.directed = dkey(a, b);
+                keys[3*f+j] = ukey(faces[3*f+j], faces[3*f+(j+1)%3]);
+                slots[3*f+j] = (int32_t)(3*f+j);
             }
-        }
+        sort_u64_pairs(keys, slots);
         std::vector<uint64_t> boundary;
-        // Boundary edges are normally tiny compared with all triangle edges;
-        // avoid a giant speculative reserve and let this vector grow naturally.
-        for (const auto& kv : euse)
-            if (kv.second.count == 1) boundary.push_back(kv.second.directed);
+        for (size_t i = 0; i < keys.size();) {
+            size_t j = i + 1;
+            while (j < keys.size() && keys[j] == keys[i]) ++j;
+            if (j - i == 1) {
+                const int32_t s = slots[i];
+                const size_t f = (size_t)s / 3;
+                boundary.push_back(dkey(faces[s], faces[3*f + (s % 3 + 1) % 3]));
+            }
+            i = j;
+        }
         if (F >= 1000000) {
-            printf("  [fill-holes-stream] %s F=%zu boundary=%zu (single edge map)\n",
+            printf("  [fill-holes-stream] %s F=%zu boundary=%zu (sorted edges)\n",
                    pass, F, boundary.size());
             fflush(stdout);
         }
-        // Force release before allocating the small successor/adjacency maps.
-        decltype(euse)().swap(euse);
         return boundary;
     };
 
