@@ -1,6 +1,7 @@
 #pragma once
 #include "uv_bake.h"
 #include "tri_bvh.h"
+#include "flat_index.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -8,18 +9,20 @@
 
 namespace trellis::detail {
 struct VoxSampler {
-    std::unordered_map<uint64_t, int> map;
+    // cosmic.cpp: flat open-addressing map (was unordered_map); the bake queries it 8+ times per
+    // texel over millions of texels.
+    FlatIndex map;
     const std::vector<float>* feats;
     int res;
     const TriBvh* snap;
     static uint64_t key(int x, int y, int z) {
         return ((uint64_t)(uint32_t)x << 40) | ((uint64_t)(uint32_t)y << 20) | (uint32_t)z;
     }
-    explicit VoxSampler(const VoxelPbr& v) : feats(v.feats), res(v.res), snap(v.snap) {
-        map.reserve(v.coords->size() * 2);
+    explicit VoxSampler(const VoxelPbr& v)
+        : map(v.coords->size()), feats(v.feats), res(v.res), snap(v.snap) {
         for (size_t i = 0; i < v.coords->size(); ++i) {
             const auto& c = (*v.coords)[i];
-            map[key(c[0], c[1], c[2])] = (int)i;
+            map.assign(key(c[0], c[1], c[2]), (int)i);   // last duplicate wins, as operator[] did
         }
     }
     bool trilinear(const float p[3], float out[6]) const {
@@ -33,9 +36,9 @@ struct VoxSampler {
         for (int dz = 0; dz < 2; ++dz) for (int dy = 0; dy < 2; ++dy) for (int dx = 0; dx < 2; ++dx) {
             const float ww = (dx ? w[0] : 1-w[0]) * (dy ? w[1] : 1-w[1]) * (dz ? w[2] : 1-w[2]);
             if (ww <= 0.f) continue;
-            auto it = map.find(key(b[0]+dx, b[1]+dy, b[2]+dz));
-            if (it == map.end()) continue;
-            const float* f = &(*feats)[(size_t)it->second * 6];
+            const int32_t it = map.find(key(b[0]+dx, b[1]+dy, b[2]+dz));
+            if (it < 0) continue;
+            const float* f = &(*feats)[(size_t)it * 6];
             for (int k = 0; k < 6; ++k) acc[k] += ww * f[k];
             wsum += ww;
         }
@@ -62,9 +65,9 @@ struct VoxSampler {
                 const float distance = std::max({std::abs(dx-fraction[0]),
                     std::abs(dy-fraction[1]), std::abs(dz-fraction[2])});
                 if (distance > r+0.5f || (r>1 && distance <= r-0.5f)) continue;
-                auto it = map.find(key(b[0]+dx, b[1]+dy, b[2]+dz));
-                if (it == map.end()) continue;
-                const float* f = &(*feats)[(size_t)it->second * 6];
+                const int32_t it = map.find(key(b[0]+dx, b[1]+dy, b[2]+dz));
+                if (it < 0) continue;
+                const float* f = &(*feats)[(size_t)it * 6];
                 for (int k = 0; k < 6; ++k) racc[k] += f[k];
                 ++hits;
             }

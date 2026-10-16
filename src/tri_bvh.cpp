@@ -3,9 +3,18 @@
 #include <cmath>
 #include <cstring>
 #include <cstdio>
+#include <thread>
 #include <unordered_map>
 
 namespace trellis {
+
+#ifdef TRELLIS_HAVE_GPU_BVH
+std::shared_ptr<void> bvh_gpu_upload(const TriBvh::Node* nodes, int64_t nnodes, const int32_t* prim,
+                                     int64_t nprim, const float* verts, int64_t V,
+                                     const int32_t* faces, int64_t F);
+bool bvh_gpu_closest(const std::shared_ptr<void>& handle, const float* points, int64_t n, float max_dist,
+                     float* dist2, int32_t* face, float* point);
+#endif
 
 namespace {
 
@@ -76,10 +85,11 @@ inline float box_dist2(const float* p, const float* bmin, const float* bmax) {
 }  // namespace
 
 TriBvh TriBvh::build(const float* verts, int64_t V, const int32_t* faces, int64_t F) {
-    (void)V;
     TriBvh t;
     t.verts_ = verts;
     t.faces_ = faces;
+    t.nverts_ = V;
+    t.nfaces_ = F;
     if (F == 0) return t;
     t.prim_.resize((size_t)F);
     std::vector<float> cent((size_t)F * 3);
@@ -148,6 +158,36 @@ TriBvh TriBvh::build(const float* verts, int64_t V, const int32_t* faces, int64_
 
 TriBvh::Hit TriBvh::closest(const float p[3], float max_dist) const {
     return closest_filtered(p, nullptr, nullptr, max_dist);
+}
+
+void TriBvh::closest_batch(const float* points, int64_t n, float max_dist,
+                           float* dist2, int32_t* face, float* point) const {
+    if (n <= 0) return;
+#ifdef TRELLIS_HAVE_GPU_BVH
+    if (!nodes_.empty()) {
+        if (!gpu_) gpu_ = bvh_gpu_upload(nodes_.data(), (int64_t)nodes_.size(), prim_.data(),
+                                         (int64_t)prim_.size(), verts_, nverts_, faces_, nfaces_);
+        if (gpu_ && bvh_gpu_closest(gpu_, points, n, max_dist, dist2, face, point)) return;
+        gpu_.reset();
+        fprintf(stderr, "[cosmic] BVH closest on CPU (%lld queries)\n", (long long)n);
+    }
+#endif
+    const int64_t nt = std::max<int64_t>(1, std::thread::hardware_concurrency());
+    const int64_t chunk = (n + nt - 1) / nt;
+    std::vector<std::thread> ts;
+    for (int64_t t = 0; t < nt; ++t) {
+        const int64_t b = t * chunk, e = std::min(n, b + chunk);
+        if (b >= e) break;
+        ts.emplace_back([=]() {
+            for (int64_t i = b; i < e; ++i) {
+                const Hit h = closest(points + 3*i, max_dist);
+                dist2[i] = h.dist2;
+                face[i] = h.face;
+                if (point) std::memcpy(point + 3*i, h.point, 12);
+            }
+        });
+    }
+    for (auto& th : ts) th.join();
 }
 
 TriBvh::Hit TriBvh::closest_filtered(const float p[3], PointFilter accept, void *context, float max_dist) const {
