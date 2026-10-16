@@ -209,17 +209,26 @@ static std::string asset_copyright_json(const char* copyright) {
     return s;
 }
 
-bool write_glb(const char* path, const float* verts, int64_t V, const int32_t* faces, int64_t F,
-               const float* colors, int64_t seed, const char* copyright) {
-    // 1. rotate (x,y,z)->(x,z,-y); track min/max
+// Positions in glTF's frame (+Y up) plus their bounds. trellis_frame: rotate
+// (x,y,z)->(x,z,-y) out of TRELLIS world space; otherwise copy as-is.
+static std::vector<float> gltf_positions(const float* verts, int64_t V, bool trellis_frame,
+                                         float mn[3], float mx[3]) {
     std::vector<float> pos((size_t)V * 3);
-    float mn[3] = { FLT_MAX, FLT_MAX, FLT_MAX }, mx[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+    for (int c = 0; c < 3; ++c) { mn[c] = FLT_MAX; mx[c] = -FLT_MAX; }
     for (int64_t i = 0; i < V; ++i) {
-        float ox = verts[3*i], oy = verts[3*i+1], oz = verts[3*i+2];
-        float p[3] = { ox, oz, -oy };
+        const float ox = verts[3*i], oy = verts[3*i+1], oz = verts[3*i+2];
+        const float p[3] = { ox, trellis_frame ? oz : oy, trellis_frame ? -oy : oz };
         for (int c = 0; c < 3; ++c) { pos[3*i+c] = p[c]; mn[c] = std::min(mn[c], p[c]); mx[c] = std::max(mx[c], p[c]); }
     }
     if (V == 0) { mn[0]=mn[1]=mn[2]=0; mx[0]=mx[1]=mx[2]=0; }
+    return pos;
+}
+
+bool write_glb(const char* path, const float* verts, int64_t V, const int32_t* faces, int64_t F,
+               const float* colors, int64_t seed, const char* copyright, bool trellis_frame) {
+    // 1. to glTF frame; track min/max
+    float mn[3], mx[3];
+    const std::vector<float> pos = gltf_positions(verts, V, trellis_frame, mn, mx);
 
     // 2. BIN buffer: positions (V*12), indices (F*12 uint32), [optional colors (V*12 float VEC3)]
     const uint32_t posBytes = (uint32_t)(V * 12), idxBytes = (uint32_t)(F * 12);
@@ -317,13 +326,11 @@ std::vector<float> welded_normals_gltf(const float* pos, int64_t V,
 bool write_glb_textured(const char* path, const float* verts, int64_t V, const float* uv,
                         const int32_t* faces, int64_t F,
                         const unsigned char* base_rgba, const unsigned char* mr_rgba, int T,
-                        bool double_sided, int64_t seed, const char* copyright, bool use_webp) {
-    // rotate positions (x,z,-y) + min/max
-    std::vector<float> pos((size_t)V*3);
-    float mn[3]={FLT_MAX,FLT_MAX,FLT_MAX}, mx[3]={-FLT_MAX,-FLT_MAX,-FLT_MAX};
-    for (int64_t i=0;i<V;++i){ float ox=verts[3*i],oy=verts[3*i+1],oz=verts[3*i+2]; float p[3]={ox,oz,-oy};
-        for(int c=0;c<3;++c){pos[3*i+c]=p[c]; mn[c]=std::min(mn[c],p[c]); mx[c]=std::max(mx[c],p[c]);} }
-    if (V==0){mn[0]=mn[1]=mn[2]=0;mx[0]=mx[1]=mx[2]=0;}
+                        bool double_sided, int64_t seed, const char* copyright, bool use_webp,
+                        bool trellis_frame) {
+    // positions in glTF frame + min/max
+    float mn[3], mx[3];
+    const std::vector<float> pos = gltf_positions(verts, V, trellis_frame, mn, mx);
     const auto nrm=welded_normals_gltf(pos.data(),V,faces,F);
 
     // encode textures — lossy WebP at the reference's quality when available,

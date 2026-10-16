@@ -8,7 +8,9 @@
 //                      DC remesh band width, default 1 — see --band), "model"
 //                      (trellis|pixal3d — one directory holds both), "faces"
 //                      (QEM decimation face target, >= 1000 or "auto" — see
-//                      --faces), and for
+//                      --faces), "atlas" (UV atlas px), "preset" (cosmic.cpp game
+//                      budget: personaje | prop | fondo | detalle; "faces" / "atlas"
+//                      in the same request override it), and for
 //                      pixal3d the camera: "fov" (degrees), "mesh_scale",
 //                      "extend_pixel". Returns model/gltf-binary.
 //
@@ -108,10 +110,28 @@ int main(int argc, char** argv) {
         if (req.has_file("bg_removal")) p.birefnet = (req.get_file_value("bg_removal").content == "birefnet") ? 1 : 0;
         if (req.has_file("uv")) p.xatlas = (req.get_file_value("uv").content == "xatlas");
         if (req.has_file("band")) p.band = atoi(req.get_file_value("band").content.c_str());
+        // cosmic.cpp: "preset" first so an explicit "faces" / "atlas" in the same request wins,
+        // the same last-one-wins order as the CLI.
+        if (req.has_file("preset")) {
+            std::string error;
+            if (!trellis::apply_game_preset(req.get_file_value("preset").content.c_str(), p, error)) {
+                res.status = 400;
+                res.set_content(error + "\n", "text/plain");
+                return;
+            }
+        }
         if (req.has_file("faces")) {
             std::string error;
-            if (!trellis::parse_faces_arg(req.get_file_value("faces").content.c_str(), p, error) ||
-                !trellis::check_faces_compat(p, error)) {   // launch-time --decim + per-request faces
+            if (!trellis::parse_faces_arg(req.get_file_value("faces").content.c_str(), p, error)) {
+                res.status = 400;
+                res.set_content(error + "\n", "text/plain");
+                return;
+            }
+        }
+        if (req.has_file("atlas")) p.tex = atoi(req.get_file_value("atlas").content.c_str());
+        if (req.has_file("preset") || req.has_file("faces")) {
+            std::string error;
+            if (!trellis::check_faces_compat(p, error)) {   // launch-time --decim + per-request budget
                 res.status = 400;
                 res.set_content(error + "\n", "text/plain");
                 return;

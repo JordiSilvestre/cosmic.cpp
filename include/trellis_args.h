@@ -161,4 +161,9 @@ bool parse_faces_arg(const char* value, TrellisParams& p, std::string& error);
 // full mesh) rather than silently ignoring it. Call after all params are applied.
 bool check_faces_compat(const TrellisParams& p, std::string& error);
 
+// cosmic.cpp game presets: set the QEM face target and UV atlas for a typical game use
+// (personaje 30K/2048, prop 8K/1024, fondo 2K/512, detalle 300K/2048). Flags parsed after
+// the preset still override it (last one wins). Shared by the CLI and the server.
+bool apply_game_preset(const char* name, TrellisParams& p, std::string& error);
+
 }  // namespace trellis

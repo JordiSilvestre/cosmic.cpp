@@ -1,3 +1,22 @@
+# cosmic.cpp
+
+Fork of [pwilkin/trellis.cpp](https://github.com/pwilkin/trellis.cpp) used as the local image-to-3D
+engine of a game-creation app. It runs **Pixal3D** (`--model pixal3d`) and keeps the upstream
+TRELLIS.2 path unchanged. Changes on top of upstream:
+
+- GLB export keeps Pixal3D in glTF's frame (+Y up, front +Z) instead of applying the TRELLIS.2
+  rotation, which laid Pixal3D assets on their back.
+- Post-QEM cleanup (Pixal3D) joins faces only across manifold edges, so flaps hanging off the body
+  by one vertex or by a non-manifold edge are dropped, then small holes are closed: one watertight
+  piece instead of ~500.
+- `--preset personaje|prop|fondo|detalle` (CLI and server field `preset`): game face/atlas budgets.
+- Binaries are named `cosmic-cli` / `cosmic-server` (CMake targets keep upstream names).
+- `scripts/build-cuda-windows.bat`: CUDA build with VS 2022 BuildTools.
+
+The upstream README follows.
+
+---
+
 # trellis.cpp
 
 A standalone, **GGML-based C++** implementation of Microsoft's
