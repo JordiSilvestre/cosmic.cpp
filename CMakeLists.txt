@@ -111,6 +111,7 @@ add_library(trellis_core STATIC
   src/tri_bvh.cpp
   src/remesh_dc.cpp
   src/decimate_qem.cpp
+  src/mesh_sort.cpp
   src/mesh_shape.cpp
   src/quad_refinement.cpp
   src/quad_refinement_gates.cpp
@@ -219,6 +220,9 @@ if(TARGET ggml-cuda)
   target_sources(trellis_core PRIVATE src/deform_conv.cu)
   # Self-contained CUDA QEM decimation (mirrors the CPU port; uses cub for scan/sort/RLE).
   target_sources(trellis_core PRIVATE src/decimate_qem.cu)
+  # cosmic.cpp: GPU radix sort for mesh adjacency (clean_mesh, component passes).
+  target_sources(trellis_core PRIVATE src/mesh_sort.cu)
+  target_compile_definitions(trellis_core PUBLIC TRELLIS_HAVE_GPU_MESHSORT)
   if(MSVC)
     # CUDA 13.3 CCCL requires MSVC's conforming preprocessor for host compilation.
     target_compile_options(trellis_core PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>")
@@ -485,6 +489,11 @@ set_target_properties(trellis-server PROPERTIES BUILD_RPATH "${GGML_RPATH}" OUTP
 if(MSVC AND COSMIC_SEGMENT_HEAP)
   target_sources(trellis-server PRIVATE ${CMAKE_SOURCE_DIR}/scripts/cosmic.manifest)
 endif()
+
+# cosmic.cpp: sort-based adjacency must match the previous hash-map implementations bit for bit.
+add_executable(cosmic-test-mesh-sort src/test_mesh_sort.cpp)
+target_link_libraries(cosmic-test-mesh-sort PRIVATE trellis_core)
+set_target_properties(cosmic-test-mesh-sort PROPERTIES BUILD_RPATH "${GGML_RPATH}")
 
 add_executable(trellis-test-ss-full src/test_ss_full.cpp)
 target_link_libraries(trellis-test-ss-full PRIVATE trellis_core)

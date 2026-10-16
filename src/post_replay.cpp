@@ -50,23 +50,31 @@ static double now() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-// boundary/non-manifold audit over the welded index space (positions assumed welded)
-#include <unordered_map>
+// boundary/non-manifold audit over the welded index space (positions assumed welded).
+// cosmic.cpp: counts edge uses with one key sort (mesh_sort.h) instead of a hash map, so the
+// audit no longer dominates the per-stage timings it is printed next to.
+#include "mesh_sort.h"
 static void audit(const char* tag, const std::vector<int32_t>& faces) {
-    std::unordered_map<uint64_t,int> e;
-    e.reserve(faces.size() * 2);
     const size_t F = faces.size() / 3;
-    auto k = [](int a, int b){ if (a>b){int t=a;a=b;b=t;} return ((uint64_t)(uint32_t)a<<32)|(uint32_t)b; };
+    std::vector<uint64_t> keys(faces.size());
+    std::vector<int32_t> unused(faces.size(), 0);
     for (size_t f = 0; f < F; ++f)
-        for (int j = 0; j < 3; ++j) e[k(faces[3*f+j], faces[3*f+(j+1)%3])]++;
+        for (int j = 0; j < 3; ++j)
+            keys[3*f+j] = trellis::undirected_edge_key(faces[3*f+j], faces[3*f+(j+1)%3]);
+    trellis::sort_u64_pairs(keys, unused);
     size_t nb = 0, nm = 0;
-    for (auto& kv : e) { if (kv.second == 1) ++nb; else if (kv.second > 2) ++nm; }
+    for (size_t i = 0; i < keys.size();) {
+        size_t j = i + 1;
+        while (j < keys.size() && keys[j] == keys[i]) ++j;
+        if (j - i == 1) ++nb; else if (j - i > 2) ++nm;
+        i = j;
+    }
     printf("  [audit] %-22s F=%-9zu boundary_edges=%-7zu nonmanifold=%zu\n", tag, F, nb, nm);
     fflush(stdout);
 }
 
 int main(int argc, char** argv) {
-    if (argc < 3) { fprintf(stderr, "usage: post-replay <dump.bin|triangles.obj> <out.glb> [opts] [--dump-geometry mesh.obj]\n"); return 1; }
+    if (argc < 3) { fprintf(stderr, "usage: post-replay <dump.bin|triangles.obj> <out.glb> [opts] [--pixal3d] [--dump-geometry mesh.obj]\n"); return 1; }
     const char* dump = argv[1];
     const char* out = argv[2];
     const char* geometry_dump = nullptr;
@@ -80,7 +88,7 @@ int main(int argc, char** argv) {
     bool quad_refine_qualified = false;
     bool quad_match_safe = false;
     bool boxuv = false, do_weld = true, do_fill = true, do_bake = true, do_remesh = true, do_snap = true;
-    bool keep_components = false, shape_flips = false, shape_smooth = false;
+    bool keep_components = false, shape_flips = false, shape_smooth = false, pixal3d = false;
     float shape_min_angle = 1.0f;
     float shape_max_move = 0.001f;
     int band = 1;
@@ -108,6 +116,7 @@ int main(int argc, char** argv) {
         }
         else if (a == "--no-snap") do_snap = false;
         else if (a == "--keep-components") keep_components = true;
+        else if (a == "--pixal3d") pixal3d = true;
         else if (a == "--shape-flips") shape_flips = true;
         else if (a == "--shape-smooth") shape_smooth = true;
         else if (a == "--shape-min-angle" && i+1 < argc) {
@@ -203,17 +212,24 @@ int main(int argc, char** argv) {
     } else {
         FILE* f = fopen(dump, "rb");
         if (!f) { fprintf(stderr, "cannot open %s\n", dump); return 1; }
-        if (fread(&V,4,1,f)+fread(&F,4,1,f)+fread(&Mv,4,1,f)+fread(&res,4,1,f) != 4 ||
-            V <= 0 || F <= 0 || Mv < 0 || res <= 0) return 1;
+        auto bad = [&](const char* what) { fprintf(stderr, "%s: bad POST dump (%s)\n", dump, what); fclose(f); return 1; };
+        // Sequenced reads: the order of operands of `+` is unspecified, and MSVC evaluated
+        // fread(&V)+fread(&F)+... out of order, scrambling V/F/Mv/res on Windows.
+        size_t header = fread(&V,4,1,f);
+        header += fread(&F,4,1,f);
+        header += fread(&Mv,4,1,f);
+        header += fread(&res,4,1,f);
+        if (header != 4 || V <= 0 || F <= 0 || Mv < 0 || res <= 0) return bad("header");
         if (!geometry_res) geometry_res = res;
         verts.resize((size_t)V*3);
         faces.resize((size_t)F*3);
         coords.resize((size_t)Mv);
         pbr6.resize((size_t)Mv*6);
-        if (fread(verts.data(),4,verts.size(),f) != verts.size()) return 1;
-        if (fread(faces.data(),4,faces.size(),f) != faces.size()) return 1;
-        for (auto& c : coords) if (fread(c.data(),4,3,f) != 3) return 1;
-        if (fread(pbr6.data(),4,pbr6.size(),f) != pbr6.size()) return 1;
+        if (fread(verts.data(),4,verts.size(),f) != verts.size()) return bad("vertices");
+        if (fread(faces.data(),4,faces.size(),f) != faces.size()) return bad("faces");
+        for (auto& c : coords) if (fread(c.data(),4,3,f) != 3) return bad("voxel coords");
+        { const size_t got = fread(pbr6.data(),4,pbr6.size(),f);
+          if (got != pbr6.size()) { fprintf(stderr, "  read %zu of %zu PBR floats, ftell=%ld eof=%d err=%d\n", got, pbr6.size(), ftell(f), feof(f), ferror(f)); return bad("voxel PBR"); } }
         fclose(f);
     }
     printf("loaded: V=%d F=%d voxels=%d pbr_res=%d geometry_res=%d\n", V, F, Mv, res, geometry_res);
@@ -268,10 +284,10 @@ int main(int argc, char** argv) {
             }
         }
         if (!keep_components) {
-            // cosmic.cpp: replays the upstream (TRELLIS.2) path. POST dumps do not record the
-            // model family, so the Pixal3D-only manifold-edge pass and glTF-frame export of
-            // trellis_cli.cpp are not applied here.
-            int ndrop2 = trellis::drop_small_components(dv, df, 0.03f);
+            // cosmic.cpp: POST dumps do not record the model family; --pixal3d replays the
+            // Pixal3D path of trellis_cli.cpp (manifold-edge pass + hole fill, glTF-frame export).
+            int ndrop2 = trellis::drop_small_components(dv, df, 0.03f, /*edge_connected=*/pixal3d);
+            if (ndrop2 && pixal3d && do_fill) trellis::fill_small_holes(df);
             if (ndrop2) printf("  dropped %d more comps\n", ndrop2);
             audit("drop2", df);
         }
@@ -545,13 +561,15 @@ int main(int argc, char** argv) {
         : trellis::uv_bake(dv, (int)dv.size()/3, df, (int)df.size()/3, no_vp, atlas, &vox);
     if (!boxuv && !bm.ok())
         bm = trellis::uv_chart_project(dv, (int)dv.size()/3, df, (int)df.size()/3, no_vp, atlas, &vox);
-    printf("  [bake %.1fs]\n", now()-t);
+    printf("  [bake %.1fs]\n", now()-t); t = now();
     if (!bm.ok()) { fprintf(stderr, "bake failed\n"); return 1; }
     printf("  [audit] bake: faces in=%zu out=%zu (dropped %lld)\n",
            df.size()/3, bm.faces.size()/3, (long long)(df.size()/3) - (long long)(bm.faces.size()/3));
     trellis::write_glb_textured(out, bm.verts.data(), (int64_t)bm.verts.size()/3, bm.uv.data(),
                                 bm.faces.data(), (int64_t)bm.faces.size()/3, bm.base.data(), bm.mr.data(), bm.T,
-                                /*double_sided=*/rm.F() == 0);
+                                /*double_sided=*/rm.F() == 0, /*seed=*/-1, /*copyright=*/nullptr,
+                                /*use_webp=*/true, /*trellis_frame=*/!pixal3d);
+    printf("  [write %.1fs]\n", now()-t);
     printf("wrote %s (atlas %d)\n", out, bm.T);
     return 0;
 }
