@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- cosmic.cpp: use the Windows Segment Heap (Windows 10 2004+). The postprocess makes millions
+     of small allocations (hash maps, per-face vectors); the default NT heap made it ~9 s slower
+     than the same build under Linux/WSL on a 300K-face asset. -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <heapType xmlns="http://schemas.microsoft.com/SMI/2020/WindowsSettings">SegmentHeap</heapType>
+    </windowsSettings>
+  </application>
+</assembly>
