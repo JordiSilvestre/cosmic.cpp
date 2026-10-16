@@ -460,6 +460,11 @@ set_target_properties(trellis-test-pixal3d PROPERTIES BUILD_RPATH "${GGML_RPATH}
 add_executable(trellis-cli src/trellis_cli_main.cpp src/trellis_cli.cpp src/trellis_args.cpp)
 target_link_libraries(trellis-cli PRIVATE trellis_core)
 set_target_properties(trellis-cli PROPERTIES BUILD_RPATH "${GGML_RPATH}" OUTPUT_NAME cosmic-cli)
+# cosmic.cpp: Segment Heap on Windows (faster for the allocation-heavy postprocess).
+option(COSMIC_SEGMENT_HEAP "Embed a manifest selecting the Windows Segment Heap" ON)
+if(MSVC AND COSMIC_SEGMENT_HEAP)
+  target_sources(trellis-cli PRIVATE ${CMAKE_SOURCE_DIR}/scripts/cosmic.manifest)
+endif()
 
 # Resident HTTP server (keeps the process warm; wraps trellis_run).
 find_package(Threads REQUIRED)
@@ -477,6 +482,9 @@ add_executable(trellis-server src/trellis-server.cpp src/trellis_cli.cpp src/tre
 target_include_directories(trellis-server PRIVATE ${CMAKE_SOURCE_DIR}/thirdparty/cpp-httplib)
 target_link_libraries(trellis-server PRIVATE trellis_core Threads::Threads)
 set_target_properties(trellis-server PROPERTIES BUILD_RPATH "${GGML_RPATH}" OUTPUT_NAME cosmic-server)
+if(MSVC AND COSMIC_SEGMENT_HEAP)
+  target_sources(trellis-server PRIVATE ${CMAKE_SOURCE_DIR}/scripts/cosmic.manifest)
+endif()
 
 add_executable(trellis-test-ss-full src/test_ss_full.cpp)
 target_link_libraries(trellis-test-ss-full PRIVATE trellis_core)
