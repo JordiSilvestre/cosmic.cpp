@@ -48,9 +48,32 @@ bool parse_faces_arg(const char* value, TrellisParams& p, std::string& error) {
     return true;
 }
 
+namespace {
+struct GamePreset { const char* name; int faces; int atlas; };
+// Budgets for a third-person game in Godot: hero characters keep enough silhouette for close
+// cameras, props stay cheap enough to place dozens, background pieces are seen from afar.
+constexpr GamePreset kGamePresets[] = {
+    {"personaje", 30000,  2048},
+    {"prop",      8000,   1024},
+    {"fondo",     2000,   512},
+    {"detalle",   300000, 2048},
+};
+}  // namespace
+
+bool apply_game_preset(const char* name, TrellisParams& p, std::string& error) {
+    for (const GamePreset& g : kGamePresets)
+        if (std::strcmp(name, g.name) == 0) {
+            p.faces = g.faces;
+            p.tex = g.atlas;
+            return true;
+        }
+    error = std::string("unknown preset '") + name + "' (personaje | prop | fondo | detalle)";
+    return false;
+}
+
 bool check_faces_compat(const TrellisParams& p, std::string& error) {
     if (p.faces > 0 && p.decim >= 0) {
-        error = "faces sets the QEM decimation target and cannot be combined with --decim";
+        error = "faces / preset set the QEM decimation target and cannot be combined with --decim";
         return false;
     }
     return true;
@@ -135,6 +158,9 @@ void print_usage(const char* argv0, bool server) {
         "      --decim GRID        legacy cluster-grid decimation instead of QEM\n"
         "                          (0 = keep the full-res mesh); not combinable with --faces\n"
         "      --atlas PX          UV atlas size (default 2048 @1024 / 1024 @512)\n"
+        "      --preset NAME       game budget (cosmic.cpp): personaje 30K faces/2048,\n"
+        "                          prop 8K/1024, fondo 2K/512, detalle 300K/2048;\n"
+        "                          later --faces / --atlas override it\n"
         "      --tex-res N         texture PBR resolution 512/1024 (default: auto — drops\n"
         "                          a dense res-1024 decode to a clean res-512 PBR volume)\n"
         "      --webp on|off       encode GLB textures as WebP (default: on when built with\n"
@@ -232,6 +258,9 @@ bool parse_args(int argc, char** argv, TrellisParams& p) {
                                                   std::string error;
                                                   if (!parse_faces_arg(v, p, error)) { fprintf(stderr, "[trellis] %s\n", error.c_str()); return false; } }
         else if (a == "--atlas" || a == "--tex"){ const char* v = need(a.c_str()); if (!v) return false; p.tex = atoi(v); }
+        else if (a == "--preset")               { const char* v = need(a.c_str()); if (!v) return false;
+                                                  std::string error;
+                                                  if (!apply_game_preset(v, p, error)) { fprintf(stderr, "[trellis] %s\n", error.c_str()); return false; } }
         else if (a == "--tex-res")              { const char* v = need(a.c_str()); if (!v) return false; p.tex_res = atoi(v); }
         else if (a == "--webp")                 { const char* v = need(a.c_str()); if (!v) return false;
                                                   p.webp = (std::strcmp(v,"off")==0 || std::strcmp(v,"0")==0 || std::strcmp(v,"false")==0) ? 0

@@ -268,6 +268,9 @@ int main(int argc, char** argv) {
             }
         }
         if (!keep_components) {
+            // cosmic.cpp: replays the upstream (TRELLIS.2) path. POST dumps do not record the
+            // model family, so the Pixal3D-only manifold-edge pass and glTF-frame export of
+            // trellis_cli.cpp are not applied here.
             int ndrop2 = trellis::drop_small_components(dv, df, 0.03f);
             if (ndrop2) printf("  dropped %d more comps\n", ndrop2);
             audit("drop2", df);

@@ -398,17 +398,46 @@ void decimate_simplify(const std::vector<float>& verts, int V, const std::vector
 // large secondary shells (e.g. a hollow vase's inner+outer surface, ~50% each). The
 // reference reconstruction is a single watertight component; these floaters are pure junk
 // that spawn extra UV charts and visible specks. Compacts verts/faces in place.
-int drop_small_components(std::vector<float>& verts, std::vector<int32_t>& faces, float frac) {
+// Component id per face. Vertex mode unions a face's vertices (faces touching at one vertex
+// share a component); edge mode unions faces across each undirected edge they share.
+static std::vector<int> face_components(const std::vector<int32_t>& faces, int V, bool edge_connected) {
+    const size_t F = faces.size() / 3;
+    std::vector<int> par(edge_connected ? F : (size_t)V);
+    for (size_t i = 0; i < par.size(); ++i) par[i] = (int)i;
+    auto find = [&](int x) { while (par[x] != x) { par[x] = par[par[x]]; x = par[x]; } return x; };
+    auto uni  = [&](int a, int b) { int ra = find(a), rb = find(b); if (ra != rb) par[ra] = rb; };
+    std::vector<int> comp(F);
+    if (!edge_connected) {
+        for (size_t f = 0; f < F; ++f) { uni(faces[3*f], faces[3*f+1]); uni(faces[3*f+1], faces[3*f+2]); }
+        for (size_t f = 0; f < F; ++f) comp[f] = find(faces[3*f]);
+        return comp;
+    }
+    // Only manifold edges (exactly two faces) join: a fin glued on by an edge shared with 3-4
+    // faces (non-manifold; ~2K on a 300K-face Pixal3D knight) must count as its own component.
+    struct EdgeUse { int f0 = -1, f1 = -1, n = 0; };
+    std::unordered_map<uint64_t, EdgeUse> edges;
+    edges.reserve(F * 2);
+    for (size_t f = 0; f < F; ++f)
+        for (int k = 0; k < 3; ++k) {
+            const uint32_t a = (uint32_t)faces[3*f + k], b = (uint32_t)faces[3*f + (k + 1) % 3];
+            EdgeUse& e = edges[((uint64_t)std::min(a, b) << 32) | std::max(a, b)];
+            if (e.n == 0) e.f0 = (int)f; else if (e.n == 1) e.f1 = (int)f;
+            ++e.n;
+        }
+    for (const auto& kv : edges)
+        if (kv.second.n == 2) uni(kv.second.f0, kv.second.f1);
+    for (size_t f = 0; f < F; ++f) comp[f] = find((int)f);
+    return comp;
+}
+
+int drop_small_components(std::vector<float>& verts, std::vector<int32_t>& faces, float frac,
+                          bool edge_connected) {
     const int V = (int)verts.size() / 3;
     const size_t F = faces.size() / 3;
     if (V == 0 || F == 0) return 0;
-    std::vector<int> par((size_t)V);
-    for (int i = 0; i < V; ++i) par[i] = i;
-    auto find = [&](int x) { while (par[x] != x) { par[x] = par[par[x]]; x = par[x]; } return x; };
-    auto uni  = [&](int a, int b) { int ra = find(a), rb = find(b); if (ra != rb) par[ra] = rb; };
-    for (size_t f = 0; f < F; ++f) { uni(faces[3*f], faces[3*f+1]); uni(faces[3*f+1], faces[3*f+2]); }
+    const std::vector<int> comp = face_components(faces, V, edge_connected);
     std::unordered_map<int,int> fc;
-    for (size_t f = 0; f < F; ++f) fc[find(faces[3*f])]++;
+    for (size_t f = 0; f < F; ++f) fc[comp[f]]++;
     int maxfc = 0;
     for (auto& kv : fc) maxfc = std::max(maxfc, kv.second);
     const int thresh = (int)(frac * maxfc);
@@ -417,7 +446,7 @@ int drop_small_components(std::vector<float>& verts, std::vector<int32_t>& faces
     if (dropped == 0) return 0;
     std::vector<int32_t> kf; kf.reserve(faces.size());
     for (size_t f = 0; f < F; ++f)
-        if (fc[find(faces[3*f])] >= thresh)
+        if (fc[comp[f]] >= thresh)
             for (int k = 0; k < 3; ++k) kf.push_back(faces[3*f + k]);
     std::vector<int> remap((size_t)V, -1);
     std::vector<float> nv; nv.reserve(verts.size());

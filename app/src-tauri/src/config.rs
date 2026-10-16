@@ -50,9 +50,9 @@ fn portable_root() -> Option<PathBuf> {
 
 fn server_bin_name() -> &'static str {
     if cfg!(windows) {
-        "trellis-server.exe"
+        "cosmic-server.exe"
     } else {
-        "trellis-server"
+        "cosmic-server"
     }
 }
 

@@ -235,8 +235,8 @@ jobs:
           set -e
           mkdir -p dist
           if [ "${{ matrix.os }}" = "windows" ]; then
-            cp build/trellis-server.exe dist/
-            cp build/trellis-cli.exe dist/
+            cp build/cosmic-server.exe dist/
+            cp build/cosmic-cli.exe dist/
             cp build/*.dll dist/ 2>/dev/null || true
             if [ "${{ matrix.backend }}" = "cuda" ]; then
               # $CUDA_PATH is a Windows path (backslashes/spaces) that breaks bash
@@ -257,8 +257,8 @@ jobs:
             ASSET="trellis-${{ matrix.release_backend || matrix.backend }}-windows-x64.zip"
             (cd dist && 7z a -y "../$ASSET" ./* >/dev/null)
           else
-            cp build/trellis-server dist/
-            cp build/trellis-cli dist/
+            cp build/cosmic-server dist/
+            cp build/cosmic-cli dist/
             cp -P build/libggml*.so* dist/ 2>/dev/null || true
             # The ROCm runtime comes from the shared TheRock SDK that Lemonade
             # installs per the user's gfx arch (via LD_LIBRARY_PATH), not bundled

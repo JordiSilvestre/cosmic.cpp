@@ -58,7 +58,12 @@ void decimate_qem(const std::vector<float>& verts, int V, const std::vector<int3
 // frac*(largest component's). Removes decode floaters + spurious ground fragments (which
 // shatter our mesh into 50+ pieces) while keeping legitimately large secondary shells
 // (a hollow vase's inner+outer surface). In place; returns the number of components dropped.
-int drop_small_components(std::vector<float>& verts, std::vector<int32_t>& faces, float frac = 0.02f);
+// edge_connected=true joins faces only across manifold edges (exactly two faces), so flaps
+// hanging off the body by a single vertex, or fins glued on by an edge shared with 3+ faces,
+// count as their own components and get dropped too. QEM leaves hundreds of those on a
+// 300K-face Pixal3D mesh; vertex adjacency reports it as one piece.
+int drop_small_components(std::vector<float>& verts, std::vector<int32_t>& faces, float frac = 0.02f,
+                          bool edge_connected = false);
 
 // Fill small boundary loops (holes) with a centroid fan, port of CuMesh fill_holes
 // (clean_up.cu): loops whose perimeter is below max_perimeter get one new vertex at the

@@ -925,9 +925,25 @@ int trellis_run(const trellis::TrellisParams& cfg) {
             // Second component pass on the decimated mesh: a hallucinated ground plane
             // survives the dense-mesh drop (it decimates to a large flat slab) but is a
             // small fraction here and disconnected from the body. Ref is a single component.
+            // cosmic.cpp, Pixal3D only: manifold-edge connectivity also catches what QEM leaves
+            // hanging off the body by a single vertex or by a non-manifold edge (~500 pieces on a
+            // 300K-face knight). TRELLIS.2 keeps the upstream vertex-connected pass.
             if (!std::getenv("TRELLIS_RETOPO_KEEP_COMPONENTS")) {
-                int ndrop2 = trellis::drop_small_components(dv, df, 0.03f);
-                if (ndrop2) { printf("  decimated postproc: dropped %d more comps -> F=%d\n", ndrop2, (int)df.size()/3); fflush(stdout); }
+                const bool edge_conn = pix;
+                int ndrop2 = trellis::drop_small_components(dv, df, 0.03f, edge_conn);
+                const bool keep_topology = std::getenv("TRELLIS_QEM_PRESERVE_TOPOLOGY") ||
+                                           std::getenv("TRELLIS_QEM_COLLISION_GUARD");
+                if (ndrop2 && edge_conn && !keep_topology) {
+                    // A fin glued on by a non-manifold edge can take a sliver of the body with it;
+                    // close those small loops so the asset stays watertight (5 of 20 bench cases).
+                    const int nfill = trellis::fill_small_holes(df);
+                    printf("  decimated postproc: dropped %d more comps, filled %d holes -> F=%d\n",
+                           ndrop2, nfill, (int)df.size()/3);
+                    fflush(stdout);
+                } else if (ndrop2) {
+                    printf("  decimated postproc: dropped %d more comps -> F=%d\n", ndrop2, (int)df.size()/3);
+                    fflush(stdout);
+                }
             }
         }
         if (std::getenv("TRELLIS_RETOPO_SHAPE_REPAIR")) {
@@ -959,6 +975,8 @@ int trellis_run(const trellis::TrellisParams& cfg) {
                    smoothed.maximum_displacement);
         }
         const int dV = (int)dv.size()/3, dF = (int)df.size()/3;
+        if (const char* dbg = std::getenv("TRELLIS_DEBUG_PREBAKE_PLY"))   // mesh handed to uv_bake
+            trellis::write_ply(dbg, dv.data(), dV, df.data(), dF);
         // Texels are shaded straight from the per-voxel PBR volume (trilinear sampling, the
         // reference bake behavior) rather than from decimation-averaged vertex colors, so
         // full material detail survives simplification.
@@ -972,7 +990,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
                                         bm.faces.data(), (int64_t)bm.faces.size()/3, bm.base.data(), bm.mr.data(), bm.T,
                                         /*double_sided=*/rm.F() == 0, run_seed,
                                         cfg.copyright.empty() ? nullptr : cfg.copyright.c_str(),
-                                        /*use_webp=*/cfg.webp != 0);
+                                        /*use_webp=*/cfg.webp != 0, /*trellis_frame=*/!pix);
             std::string tex = outglb.substr(0, outglb.find_last_of('.')) + "_base.png";
             stbi_write_png(tex.c_str(), bm.T, bm.T, 4, bm.base.data(), bm.T*4);
             textured = true;
@@ -986,7 +1004,8 @@ int trellis_run(const trellis::TrellisParams& cfg) {
     if (!textured)
         trellis::write_glb(outglb.c_str(), mesh.verts.data(), mesh.V(), mesh.faces.data(), mesh.F(),
                            colors.empty() ? nullptr : colors.data(), run_seed,
-                           cfg.copyright.empty() ? nullptr : cfg.copyright.c_str());
+                           cfg.copyright.empty() ? nullptr : cfg.copyright.c_str(),
+                           /*trellis_frame=*/!pix);
     std::string ply = outglb.substr(0, outglb.find_last_of('.')) + ".ply";
     trellis::write_ply(ply.c_str(), mesh.verts.data(), mesh.V(), mesh.faces.data(), mesh.F(), colors.empty() ? nullptr : colors.data());
     printf("done in %.1fs -> %s (+ %s)\n", now() - t0, outglb.c_str(), ply.c_str());
