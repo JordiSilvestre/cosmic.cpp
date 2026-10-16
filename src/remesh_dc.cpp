@@ -1,7 +1,9 @@
 #include "remesh_dc.h"
 #include "tri_bvh.h"
+#include "flat_index.h"
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #ifdef _MSC_VER
 #include <intrin.h>
 #endif
@@ -51,6 +53,16 @@ Mesh remesh_narrow_band_dc(const float* iverts, int64_t iV, const int32_t* iface
     (void)iV;
     Mesh out;
     if (iF == 0 || bvh.empty() || res <= 0) return out;
+    // cosmic.cpp: COSMIC_PROFILE=1 prints the time of each remesh phase.
+    const bool profile = std::getenv("COSMIC_PROFILE") != nullptr;
+    auto t_last = std::chrono::steady_clock::now();
+    auto mark = [&](const char* phase) {
+        if (!profile) return;
+        const auto t = std::chrono::steady_clock::now();
+        printf("    [remesh %-14s %.2fs]\n", phase, std::chrono::duration<double>(t - t_last).count());
+        fflush(stdout);
+        t_last = t;
+    };
 
     // Reference domain: the world cube is inflated by (res+3·band)/res so the
     // offset shell never touches the boundary; eps is the offset distance.
@@ -131,6 +143,7 @@ Mesh remesh_narrow_band_dc(const float* iverts, int64_t iV, const int32_t* iface
                 for (size_t i = 0; i < cand.size(); ++i) cand[i] |= bits[i];
     }
 
+    mark("candidates");
     // Active voxels: |UDF(center) - eps| < 0.87*cell (spec 27 §4.1).
     std::vector<int> acoord;
     {
@@ -143,20 +156,32 @@ Mesh remesh_narrow_band_dc(const float* iverts, int64_t iV, const int32_t* iface
                 cand_cells.push_back((w << 6) | b);
             }
         }
+        // cosmic.cpp: UDF at the candidate cell centers in batches through closest_batch (GPU
+        // when available, bit-identical to the per-cell closest() it replaces).
         std::vector<uint8_t> act(cand_cells.size(), 0);
-        parallel_for((int64_t)cand_cells.size(), [&](int64_t b, int64_t e) {
-            for (int64_t i = b; i < e; ++i) {
-                const int64_t c = cand_cells[i];
-                const int x = (int)(c / ((int64_t)res * res)), y = (int)((c / res) % res), z = (int)(c % res);
-                const float p[3] = { ((x + 0.5f) / res - 0.5f) * scale,
-                                     ((y + 0.5f) / res - 0.5f) * scale,
-                                     ((z + 0.5f) / res - 0.5f) * scale };
-                const TriBvh::Hit h = bvh.closest(p, eps + keep);
-                if (h.face < 0) continue;
-                const float f = std::sqrt(h.dist2) - eps;
-                if (std::fabs(f) < keep) act[i] = 1;
+        const int64_t ncand = (int64_t)cand_cells.size();
+        const int64_t kBatch = 16 << 20;
+        std::vector<float> pts, d2;
+        std::vector<int32_t> hit;
+        for (int64_t b0 = 0; b0 < ncand; b0 += kBatch) {
+            const int64_t m = std::min(kBatch, ncand - b0);
+            pts.resize((size_t)m * 3); d2.resize((size_t)m); hit.resize((size_t)m);
+            parallel_for(m, [&](int64_t b, int64_t e) {
+                for (int64_t i = b; i < e; ++i) {
+                    const int64_t c = cand_cells[b0 + i];
+                    const int x = (int)(c / ((int64_t)res * res)), y = (int)((c / res) % res), z = (int)(c % res);
+                    pts[3*i]   = ((x + 0.5f) / res - 0.5f) * scale;
+                    pts[3*i+1] = ((y + 0.5f) / res - 0.5f) * scale;
+                    pts[3*i+2] = ((z + 0.5f) / res - 0.5f) * scale;
+                }
+            });
+            bvh.closest_batch(pts.data(), m, eps + keep, d2.data(), hit.data());
+            for (int64_t i = 0; i < m; ++i) {
+                if (hit[i] < 0) continue;
+                const float f = std::sqrt(d2[i]) - eps;
+                if (std::fabs(f) < keep) act[b0 + i] = 1;
             }
-        });
+        }
         for (size_t i = 0; i < cand_cells.size(); ++i) {
             if (!act[i]) continue;
             const int64_t c = cand_cells[i];
@@ -172,14 +197,15 @@ Mesh remesh_narrow_band_dc(const float* iverts, int64_t iV, const int32_t* iface
         return out;
     }
 
-    std::unordered_map<uint64_t, int> vox;
-    vox.reserve((size_t)Na * 2);
+    mark("active UDF");
+    // cosmic.cpp: flat open-addressing maps (flat_index.h) instead of unordered_map: the voxel
+    // and corner maps hold millions of entries and dominated the remesh time.
+    FlatIndex vox((size_t)Na);
     for (int64_t i = 0; i < Na; ++i) vox.emplace(key3(acoord[3*i], acoord[3*i+1], acoord[3*i+2]), (int)i);
 
     // f = UDF - eps at the grid VERTICES (corner mapping v/res, spec 27 §4.3).
     std::vector<int> vcoord;
-    std::unordered_map<uint64_t, int> vmap;
-    vmap.reserve((size_t)Na * 3);
+    FlatIndex vmap((size_t)Na * 2);
     for (int64_t i = 0; i < Na; ++i)
         for (int dx = 0; dx < 2; ++dx) for (int dy = 0; dy < 2; ++dy) for (int dz = 0; dz < 2; ++dz) {
             const int x = acoord[3*i] + dx, y = acoord[3*i+1] + dy, z = acoord[3*i+2] + dz;
@@ -188,22 +214,29 @@ Mesh remesh_narrow_band_dc(const float* iverts, int64_t iV, const int32_t* iface
             }
         }
     const int64_t Nv = (int64_t)vcoord.size() / 3;
+    mark("voxel maps");
     std::vector<float> fvert((size_t)Nv);
-    parallel_for(Nv, [&](int64_t b, int64_t e) {
-        for (int64_t i = b; i < e; ++i) {
-            const float p[3] = { ((float)vcoord[3*i]   / res - 0.5f) * scale,
-                                 ((float)vcoord[3*i+1] / res - 0.5f) * scale,
-                                 ((float)vcoord[3*i+2] / res - 0.5f) * scale };
-            // Crossing edges always have their far endpoint under eps+cell
-            // (f changes at most one cell-length per edge), so this bound
-            // never clips a value that feeds the crossing interpolation.
-            const TriBvh::Hit h = bvh.closest(p, eps + 2 * cell);
-            fvert[i] = (h.face >= 0 ? std::sqrt(h.dist2) : eps + 2 * cell) - eps;
-        }
-    });
+    {
+        std::vector<float> pts((size_t)Nv * 3), d2((size_t)Nv);
+        std::vector<int32_t> hit((size_t)Nv);
+        parallel_for(Nv, [&](int64_t b, int64_t e) {
+            for (int64_t i = b; i < e; ++i) {
+                pts[3*i]   = ((float)vcoord[3*i]   / res - 0.5f) * scale;
+                pts[3*i+1] = ((float)vcoord[3*i+1] / res - 0.5f) * scale;
+                pts[3*i+2] = ((float)vcoord[3*i+2] / res - 0.5f) * scale;
+            }
+        });
+        // Crossing edges always have their far endpoint under eps+cell
+        // (f changes at most one cell-length per edge), so this bound
+        // never clips a value that feeds the crossing interpolation.
+        bvh.closest_batch(pts.data(), Nv, eps + 2 * cell, d2.data(), hit.data());
+        for (int64_t i = 0; i < Nv; ++i)
+            fvert[i] = (hit[i] >= 0 ? std::sqrt(d2[i]) : eps + 2 * cell) - eps;
+    }
+    mark("vertex UDF");
     auto fval = [&](int x, int y, int z) -> float {
-        auto it = vmap.find(key3(x, y, z));
-        return it == vmap.end() ? 1e9f : fvert[it->second];
+        const int32_t it = vmap.find(key3(x, y, z));
+        return it < 0 ? 1e9f : fvert[it];
     };
 
     if (std::getenv("TRELLIS_REMESH_TETS")) {
@@ -254,7 +287,7 @@ Mesh remesh_narrow_band_dc(const float* iverts, int64_t iV, const int32_t* iface
             const int x = acoord[3*i], y = acoord[3*i+1], z = acoord[3*i+2];
             int corner[8];
             for (int mask = 0; mask < 8; ++mask)
-                corner[mask] = vmap.at(key3(x + (mask & 1), y + ((mask >> 1) & 1), z + ((mask >> 2) & 1)));
+                corner[mask] = vmap.find(key3(x + (mask & 1), y + ((mask >> 1) & 1), z + ((mask >> 2) & 1)));
             for (const auto& perm : PERM) {
                 const int tet[4] = {corner[0], corner[1 << perm[0]],
                                     corner[(1 << perm[0]) | (1 << perm[1])], corner[7]};
@@ -343,9 +376,9 @@ Mesh remesh_narrow_band_dc(const float* iverts, int64_t iV, const int32_t* iface
             int q[4];
             bool ok = true;
             for (int k = 0; k < 4 && ok; ++k) {
-                auto it = vox.find(key3(vx + OFF[axis][k][0], vy + OFF[axis][k][1], vz + OFF[axis][k][2]));
-                if (it == vox.end()) ok = false;
-                else q[k] = it->second;
+                const int32_t it = vox.find(key3(vx + OFF[axis][k][0], vy + OFF[axis][k][1], vz + OFF[axis][k][2]));
+                if (it < 0) ok = false;
+                else q[k] = it;
             }
             if (!ok) continue;
             static const int S1N[6] = {0, 1, 2, 0, 2, 3};
@@ -377,7 +410,7 @@ Mesh remesh_narrow_band_dc(const float* iverts, int64_t iV, const int32_t* iface
             for (int axis = 0; axis < 3; ++axis) {
                 int corner[3] = {base[0], base[1], base[2]};
                 ++corner[axis];
-                if (vox.find(key3(corner[0], corner[1], corner[2])) == vox.end()) continue;
+                if (vox.find(key3(corner[0], corner[1], corner[2])) < 0) continue;
                 const int u = (axis + 1) % 3, v = (axis + 2) % 3;
                 auto sign = [&](int du, int dv) {
                     int p[3] = {corner[0], corner[1], corner[2]};
@@ -421,6 +454,7 @@ Mesh remesh_narrow_band_dc(const float* iverts, int64_t iV, const int32_t* iface
                    project_back, (long long)missed.load(), (long long)NV);
     }
 
+    mark("dual + faces");
     printf("  remesh_dc: %lld active voxels -> V=%d F=%d (eps=%.4g, project_back=%.2f)\n",
            (long long)Na, out.V(), out.F(), eps, project_back);
     fflush(stdout);

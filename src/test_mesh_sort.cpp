@@ -4,6 +4,7 @@
 // which are reproduced below as the reference.
 //   cosmic-test-mesh-sort <dump.post>
 #include "mesh_sort.h"
+#include "tri_bvh.h"
 #include "uv_bake.h"
 
 #include <algorithm>
@@ -200,6 +201,37 @@ int main(int argc, char** argv) {
     printf("drop_small_components: reference %.1fs (%d), new %.1fs (%d) -> %s\n",
            d_ref, dr, d_new, dg, same_drop ? "IDENTICAL" : "DIFFERENT");
     failures += !same_drop;
+
+    {   // batched BVH closest point (GPU when compiled in) vs the scalar CPU query
+        const trellis::TriBvh bvh = trellis::TriBvh::build(verts.data(), (int64_t)verts.size() / 3,
+                                                           faces.data(), (int64_t)faces.size() / 3);
+        const int64_t nq = 1 << 20;
+        std::vector<float> q((size_t)nq * 3);
+        uint64_t rng = 0x243F6A8885A308D3ull;
+        auto unit = [&rng]() { rng = rng * 6364136223846793005ull + 1442695040888963407ull;
+                               return (float)((rng >> 40) & 0xFFFFFF) / 16777216.0f - 0.5f; };
+        const int64_t V = (int64_t)verts.size() / 3;
+        for (int64_t i = 0; i < nq; ++i) {      // near the surface, like the remesh/bake queries
+            const int64_t v = (int64_t)(((uint64_t)i * 2654435761ull) % (uint64_t)V);   // spread over the mesh
+            for (int k = 0; k < 3; ++k) q[3*i+k] = verts[3*v+k] + unit() * 0.01f;
+        }
+        const float max_dist = 0.006f;
+        std::vector<float> d2((size_t)nq), pt((size_t)nq * 3);
+        std::vector<int32_t> fc((size_t)nq);
+        double tb = now();
+        bvh.closest_batch(q.data(), nq, max_dist, d2.data(), fc.data(), pt.data());
+        const double t_batch = now() - tb; tb = now();
+        int64_t mismatch = 0;
+        for (int64_t i = 0; i < nq; ++i) {
+            const trellis::TriBvh::Hit h = bvh.closest(&q[3*i], max_dist);
+            if (h.face != fc[i] || h.dist2 != d2[i] ||
+                h.point[0] != pt[3*i] || h.point[1] != pt[3*i+1] || h.point[2] != pt[3*i+2]) ++mismatch;
+        }
+        const double t_scalar = now() - tb;
+        printf("bvh closest_batch: %lld queries, batch %.2fs, scalar single-thread %.2fs, mismatches %lld -> %s\n",
+               (long long)nq, t_batch, t_scalar, (long long)mismatch, mismatch ? "DIFFERENT" : "IDENTICAL");
+        failures += mismatch != 0;
+    }
 
     printf(failures ? "FAILED\n" : "all checks passed\n");
     return failures ? 1 : 0;

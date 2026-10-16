@@ -223,6 +223,11 @@ if(TARGET ggml-cuda)
   # cosmic.cpp: GPU radix sort for mesh adjacency (clean_mesh, component passes).
   target_sources(trellis_core PRIVATE src/mesh_sort.cu)
   target_compile_definitions(trellis_core PUBLIC TRELLIS_HAVE_GPU_MESHSORT)
+  # cosmic.cpp: batched BVH closest-point queries (remesh UDF, bake snap). No fused multiply-add,
+  # so the GPU rounds like the CPU path and results stay bit-identical.
+  target_sources(trellis_core PRIVATE src/tri_bvh_gpu.cu)
+  set_source_files_properties(src/tri_bvh_gpu.cu PROPERTIES COMPILE_OPTIONS "--fmad=false")
+  target_compile_definitions(trellis_core PUBLIC TRELLIS_HAVE_GPU_BVH)
   if(MSVC)
     # CUDA 13.3 CCCL requires MSVC's conforming preprocessor for host compilation.
     target_compile_options(trellis_core PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>")
