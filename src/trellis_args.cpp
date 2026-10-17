@@ -49,14 +49,19 @@ bool parse_faces_arg(const char* value, TrellisParams& p, std::string& error) {
 }
 
 namespace {
-struct GamePreset { const char* name; int faces; int atlas; };
+struct GamePreset { const char* name; int faces; int atlas; int steps; int fa_fast; };
 // Budgets for a third-person game in Godot: hero characters keep enough silhouette for close
 // cameras, props stay cheap enough to place dozens, background pieces are seen from afar.
+// Speed (cosmic.cpp, 17-oct-2026): the cost is the two res-1024 flows, which grow with the
+// object's on-screen size (a bush filling the frame = 19.7k tokens, 306 s). Props and background
+// pieces use F16 FlashAttention and 8 flow steps: 20-case bench median 126 s -> 69 s, visually
+// equivalent at their face/atlas budget. Characters and "detalle" keep the full-precision path.
+// steps 0 / fa_fast -1 = leave the default; an explicit --steps / --fa-* still wins.
 constexpr GamePreset kGamePresets[] = {
-    {"personaje", 30000,  2048},
-    {"prop",      8000,   1024},
-    {"fondo",     2000,   512},
-    {"detalle",   300000, 2048},
+    {"personaje", 30000,  2048, 0, -1},
+    {"prop",      8000,   1024, 8,  1},
+    {"fondo",     2000,   512,  8,  1},
+    {"detalle",   300000, 2048, 0, -1},
 };
 }  // namespace
 
@@ -65,6 +70,8 @@ bool apply_game_preset(const char* name, TrellisParams& p, std::string& error) {
         if (std::strcmp(name, g.name) == 0) {
             p.faces = g.faces;
             p.tex = g.atlas;
+            if (g.steps > 0 && p.steps == 0) p.steps = g.steps;
+            if (g.fa_fast >= 0 && p.fa_fast < 0) p.fa_fast = g.fa_fast;
             return true;
         }
     error = std::string("unknown preset '") + name + "' (personaje | prop | fondo | detalle)";
@@ -160,7 +167,9 @@ void print_usage(const char* argv0, bool server) {
         "      --atlas PX          UV atlas size (default 2048 @1024 / 1024 @512)\n"
         "      --preset NAME       game budget (cosmic.cpp): personaje 30K faces/2048,\n"
         "                          prop 8K/1024, fondo 2K/512, detalle 300K/2048;\n"
-        "                          later --faces / --atlas override it\n"
+        "                          prop and fondo also run 8 flow steps with F16\n"
+        "                          FlashAttention (~2x faster); later --faces / --atlas /\n"
+        "                          --steps / --fa-f32 override it\n"
         "      --tex-res N         texture PBR resolution 512/1024 (default: auto — drops\n"
         "                          a dense res-1024 decode to a clean res-512 PBR volume)\n"
         "      --webp on|off       encode GLB textures as WebP (default: on when built with\n"
